@@ -16,10 +16,12 @@
 
 #define P4FS_MAGIC 0x18926734
 
+#define TMPSIZE 20
+#define BUFSIZE 500
 
 
 /* Super block operations for p4fs superblock object */
-static struct super_operations p4fs_s_ops = {
+static struct super_operations p4fs_super_operations = {
 	.statfs		= simple_statfs,
 	.drop_inode 	= generic_delete_inode,
 };
@@ -30,6 +32,7 @@ static struct inode_operations p4fs_file_inode_operations = {
         .getattr        = simple_getattr,
 };
 
+static const struct inode_operations p4fs_dir_inode_operations;
 
 /*
  * Open a file.  All we have to do here is to copy over a
@@ -41,43 +44,6 @@ static int p4fs_open(struct inode *inode, struct file *filp)
         return 0;
 }
 
-#define TMPSIZE 20
-#define BUFSIZE 500
-
-/*
- * Read a file.  Here we increment and read the counter, then pass it
- * back to the caller.  The increment only happens if the read is done
- * at the beginning of the file (offset = 0); otherwise we end up counting
- * by twos.
- */
-static ssize_t p4fs_read_file(struct file *filp, char *buf,
-                size_t count, loff_t *offset)
-{
-        atomic_t *counter = (atomic_t *) filp->private_data;
-        int v, len;
-        char tmp[TMPSIZE];
-/*
- * Encode the value, and figure out how much of it we can pass back.
- */
-        v = atomic_read(counter);
-        if (*offset > 0) 
-                v -= 1;  /* the value returned when offset was zero */
-        else
-                atomic_inc(counter); 
-        len = snprintf(tmp, TMPSIZE, "%d\n", v);
-        if (*offset > len)
-                return 0; 
-        if (count > len - *offset)
-                count = len - *offset;
-/*
- * Copy it back, increment the offset, and we're done.
- */
-        if (copy_to_user(buf, tmp + *offset, count))
-                return -EFAULT;
-        *offset += count;
-        return count;
-}
-
 /*
  * FIXME: 
  * 	From where am I called?
@@ -85,11 +51,29 @@ static ssize_t p4fs_read_file(struct file *filp, char *buf,
  *	Use file's name to get pid, use pid to get information from process' task_struct
  *	Copy the updated data to the user space.
  */
-static ssize_t p4fs_read_file_(struct file *file_p, char *buf, 
+static ssize_t p4fs_read_file(struct file *file_p, char *buf, 
 		size_t count, loff_t *offset)
 {
-	/*  */
+	/* Should I only get the data of the file and dumo it or update the data ? */
+	char tmp[BUFSIZE];
+	int len;
 	
+	//char file_data[BUFSIZE];
+	// = (char *) file_p->private_data;
+	
+	if (*offset > 0)
+		return -1;
+		
+	len = snprintf(tmp, BUFSIZE, "%s\n", (char *) file_p->private_data);
+	
+	if (*offset > len)
+		return 0;
+	if (count > len - *offset)
+		count = len - *offset;
+
+	copy_to_user(buf, tmp + *offset, count);
+	*offset += count;
+	return count;
 }
 
 
@@ -99,27 +83,27 @@ static ssize_t p4fs_read_file_(struct file *file_p, char *buf,
 static ssize_t p4fs_write_file(struct file *filp, const char *buf,
                 size_t count, loff_t *offset)
 {
-        atomic_t *counter = (atomic_t *) filp->private_data;
-        char tmp[TMPSIZE];
-/*
- * Only write from the beginning.
- */
+        int len;
+	char tmp[TMPSIZE];
+	char *data = (char *) filp->private_data;
+	/*
+	 * Only write the file from start.
+	 */
         if (*offset != 0)
                 return -EINVAL;
-/*
- * Read the value from the user.
- */
+	/*
+	 * Read the value from the user.
+	 */
         if (count >= TMPSIZE)
                 return -EINVAL;
         memset(tmp, 0, TMPSIZE);
-        if (copy_from_user(tmp, buf, count))
-                return -EFAULT;
-/*
- * Store it in the counter and we are done.
- */
-        atomic_set(counter, simple_strtol(tmp, NULL, 10));
-        return count;
+        copy_from_user(tmp, buf, count);
+	
+	/* Write the data */
+	len = snprintf(data, BUFSIZE, "%s", (char *) tmp);	
+        return len;
 }
+
 
 
 /*
@@ -130,7 +114,7 @@ static struct file_operations p4fs_file_operations = {
         .open  		= p4fs_open,
         .read   	= p4fs_read_file,
         .write  	= p4fs_write_file,	
-        .read_iter      = generic_file_read_iter,
+	.read_iter      = generic_file_read_iter,
         .write_iter     = generic_file_write_iter,
         .mmap           = generic_file_mmap,
         .fsync          = noop_fsync,
@@ -139,14 +123,13 @@ static struct file_operations p4fs_file_operations = {
         .llseek         = generic_file_llseek,
 };
 
-
 /*
  * FIXME: Write documentation
  * @sb: Superblock
  * @dir: Inode
  * @mode: Mode for the new inode
  */
-static struct inode *p4fs_get_inode(struct super_block *sb, 
+struct inode *p4fs_get_inode(struct super_block *sb, 
 				const struct inode *dir, umode_t mode) {
 	struct inode *n_inode = new_inode(sb);
 	
@@ -162,7 +145,7 @@ static struct inode *p4fs_get_inode(struct super_block *sb,
                         n_inode->i_fop = &p4fs_file_operations;
                         break;
                 case S_IFDIR:	/* directory */
-                        n_inode->i_op = &simple_dir_inode_operations;	/*FIXME: Write your own operations ? */
+                        n_inode->i_op = &p4fs_dir_inode_operations;
                         n_inode->i_fop = &simple_dir_operations;
                         inc_nlink(n_inode);
                         break;
@@ -173,6 +156,51 @@ static struct inode *p4fs_get_inode(struct super_block *sb,
 	}
 	return n_inode;
 }
+
+
+
+/*
+ * File creation. Allocate an inode, and we're done..
+ */
+/* SMP-safe */
+static int p4fs_mknod(struct inode *dir, struct dentry *dentry, 
+			umode_t mode, dev_t dev)
+{
+        struct inode * inode = p4fs_get_inode(dir->i_sb, dir, mode);
+
+        if (inode) {
+                d_instantiate(dentry, inode);
+                dget(dentry);    
+                dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+		return 0;
+        }
+        return -ENOSPC;
+}
+
+static int p4fs_mkdir(struct inode * dir, struct dentry * dentry, umode_t mode)
+{
+        int retval = p4fs_mknod(dir, dentry, mode | S_IFDIR, 0);
+        if (!retval)
+                inc_nlink(dir);	/*FIXME: Already done in p4fs_get_inode */
+        return retval;
+}
+
+static int p4fs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
+{
+        return p4fs_mknod(dir, dentry, mode | S_IFREG, 0);
+}
+
+static const struct inode_operations p4fs_dir_inode_operations = {
+        .create         = p4fs_create,
+        .lookup         = simple_lookup,
+        .link           = simple_link,
+        .unlink         = simple_unlink,
+//        .symlink        = ramfs_symlink,
+        .mkdir          = p4fs_mkdir,
+        .rmdir          = simple_rmdir,
+        .mknod          = p4fs_mknod,
+        .rename         = simple_rename,
+};
 
 
 
@@ -192,129 +220,79 @@ static struct dentry *p4fs_create_dir (struct super_block *sb,
         qname.name = name;
         qname.len = strlen (name);
         qname.hash = full_name_hash(name, qname.len);
-        dentry = d_alloc(parent, &qname);
+        
+	/* Create dentry for the directory */
+	dentry = d_alloc(parent, &qname);
         if (! dentry)
                 goto out;
-
+	
+	/* Create */
         inode = p4fs_get_inode(sb, parent->d_inode, S_IFDIR | 0644);
         if (! inode)
                 goto out_dput;
-   
-	d_add(dentry, inode);
+
+        d_add(dentry, inode);
         return dentry;
 
-  	out_dput:
-        	dput(dentry);
-  	out:
-        	return 0;
+        out_dput:
+                dput(dentry);
+        out:
+                return 0;
 }
 
 
 
 
-
 /*
- * FIXME: FIx my doccumentation you dumb fuck
- * Create a file mapping a name to a counter.
+ * FIXME: FIx my doccumentation
+ * Create a file mapping a name to a counter
+ * @sb: Superblock for the file system
+ * @dir: Dentry for the directory where file is to be created
+ * @name: Name of the file
+ * @data: Data for the file
  */
 static struct dentry *p4fs_create_file (struct super_block *sb,
                 struct dentry *dir, const char *name,
                 void *data)
 {
-	/* FIXME: I don't want to deal with these dumb counters. Do something useful you shit */
         struct dentry *dentry;
         struct inode *inode;
         struct qstr qname;
-	/*
- 	 * Make a hashed version of the name to go with the dentry.
- 	 */
+        
         qname.name = name;
         qname.len = strlen (name);
         qname.hash = full_name_hash(name, qname.len);
-	/*
- 	 * Now we can create our dentry and the inode to go with it.
- 	 */
+
+        /* Create a dcache entry for the file in directory dir */ 
         dentry = d_alloc(dir, &qname);
         if (! dentry)
                 goto out;
+	/* Create an inode*/
         inode = p4fs_get_inode(sb, dir->d_inode, S_IFREG | 0644);
         if (! inode)
                 goto out_dput;
-	/* set pointer to data of the file */
+        /* set pointer to data of the file */
         inode->i_private = data;
-	
-	/* Add inode to the dentry cache */
+
+        /* Add inode to the dentry cache */
         d_add(dentry, inode);
         return dentry;
-	
-	out_dput:
-        	dput(dentry);
-  	out:
-        	return 0;
+
+        out_dput:
+                dput(dentry);
+        out:
+                return 0;
 }
 
-static struct dentry *p4fs_init_process_file(struct super_block *sb, 
-			struct dentry *dir, const char *name) 
-{
-	struct dentry *dentry;
-	struct qstr qname;
-	struct inode *inode;
-	char data[100];
-	struct task_struct *init_proc = &init_task;
-	
-	snprintf(data, 100, "name=%s, pid=%d, state=%li\n", init_proc->comm, init_proc->pid, init_proc->state);	
 
-	qname.name = name;
-	qname.len = strlen(name);
-	qname.hash = full_name_hash(name, qname.len);
 
-	dentry = d_alloc(dir, &qname);
-	if (!dentry)
-		return 0;
-	
-	inode = p4fs_get_inode(sb, dir->d_inode, S_IFREG | 0644);
-	if (!inode)
-		goto out_dput;
 
-	inode->i_private = data;
-	
-	d_add(dentry, inode);
-	return dentry;
-
-	out_dput:
-		dput(dentry);	
-	
-	return 0;
-}
-	
-
+static char data[BUFSIZE];
+static char sig_file_data[BUFSIZE];
 
 /*
- * Create files on the root directory
+ * FIXME: Add documentation
  */
-static atomic_t counter, subcounter;
-
-static void p4fs_create_files (struct super_block *sb, struct dentry *root)
-{
-	/*FIXME: Change me. I am useless right now */
-        struct dentry *subdir;
-	/*
-	 * One counter in the top-level directory.
-	 */
-        atomic_set(&counter, 0);
-        p4fs_create_file(sb, root, "counter", &counter);
-	/*
-	 * And one in a subdirectory.
-	 */
-        atomic_set(&subcounter, 0);
-        subdir = p4fs_create_dir(sb, root, "subdir");
-        if (subdir)
-                p4fs_create_file(sb, subdir, "subcounter", &subcounter);
-
-	p4fs_init_process_file(sb, root, "init");
-}
-
-
 static void p4fs_create_proc_hierarchy(struct super_block *sb, 
 		struct dentry *root, struct task_struct *task)
 {
@@ -323,19 +301,44 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	char dir_name[20];
 	char file_name[20];
 	char *signal = "signal";
-	char data[500];
-	
+	long process_state;
+	char *process_state_name;	
+
 	snprintf(dir_name, sizeof(pid_t), "%d", task->pid);
 	snprintf(file_name, 20, "%d.status", task->pid);
+
+	/* Get process data */
+	process_state = task->state;
+	switch(process_state) {
+	case 0:
+		process_state_name = "TASK_RUNNING";
+		break;
+	case 1:
+		process_state_name = "TASK_INTERRUPTIBLE";
+		break;
+	case 2:
+		process_state_name = "TASK_UNINTERRUPTIBLE";
+		break;
+	case 4:
+		process_state_name = "TASK_STOPPED";
+		break;
+	case 8:
+		process_state_name = "TASK_TRACED";
+		break;
+	default:
+		process_state_name = "";
+		break;
+	}
+
 	/*Create data here that you want to write to the file.*/
-	snprintf(data, 500, "Process: %s\nProcess State: %li\n", task->comm, task->state);
-	/*Create a directory for init process: name = pid*/
-	/*Create files for the process, 1: pid.status, 2: signal*/
+	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\n", task->comm, process_state_name);
+	memset(sig_file_data, 0, BUFSIZE);
+	
 	dir = p4fs_create_dir(sb, root, dir_name);
 	if (dir)
 	{
 		p4fs_create_file(sb, dir, file_name, data);
-		p4fs_create_file(sb, dir, signal, 0);
+		p4fs_create_file(sb, dir, signal, sig_file_data);
 	}
 	/* Now for all the children of this process */
 	list_for_each_entry(child, &task->children, sibling){
@@ -353,12 +356,13 @@ static int p4fs_fill_super(struct super_block *sb, void *data, int silent) {
 	/*
 	 * Setting parameters in superblock 
 	 */
+	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	sb->s_blocksize = PAGE_CACHE_SIZE;
 	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
 	sb->s_magic = P4FS_MAGIC;
-	sb->s_op = &p4fs_s_ops;
+	sb->s_op = &p4fs_super_operations;
 
-	/* Create an iinode for the root directory of the filesystem */
+	/* Create an inode for the root directory of the filesystem */
 	root = p4fs_get_inode(sb, NULL, S_IFDIR | 0755);
 	if (!root) 
 		return -ENOMEM;	
@@ -368,12 +372,19 @@ static int p4fs_fill_super(struct super_block *sb, void *data, int silent) {
                 return -ENOMEM;
 
 	/* FIXME: Appropriate place to create files on this filesystem? */
-	p4fs_create_files(sb, sb->s_root);
+	//p4fs_create_files(sb, sb->s_root);
 	p4fs_create_proc_hierarchy(sb, sb->s_root, &init_task);
 	return 0;
 }
 
 
+/* FIXME: Parameter Description
+ * Will be called by vfs_mount to mount this file system 
+ * @fs_type: Filesystem type structure
+ * @flags: 
+ * @dev_name: 
+ * @data: 
+ */
 struct dentry *p4fs_mount(struct file_system_type *fs_type,
         int flags, const char *dev_name, void *data)
 {
@@ -387,7 +398,7 @@ static struct file_system_type p4fs_fs_type = {
 	.owner		= THIS_MODULE,	
 	.mount		= p4fs_mount,
 	.kill_sb 	= kill_litter_super,
-	.fs_flags       = FS_USERNS_MOUNT,
+//	.fs_flags       = FS_USERNS_MOUNT,
 };
 
 
