@@ -14,10 +14,13 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 
+#include <linux/mm_types.h>
+
 #define P4FS_MAGIC 0x18926734
 
 #define TMPSIZE 20
 #define BUFSIZE 500
+#define PROC_INFO_SIZE 4000
 
 
 /* Super block operations for p4fs superblock object */
@@ -287,7 +290,7 @@ static struct dentry *p4fs_create_file (struct super_block *sb,
 
 
 
-static char data[BUFSIZE];
+static char data[PROC_INFO_SIZE];
 static char sig_file_data[BUFSIZE];
 
 /*
@@ -302,14 +305,25 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	char file_name[20];
 	char *signal = "signal";
 	long process_state;
-	char *process_state_name;	
+	char *process_state_name;
 
-	snprintf(dir_name, sizeof(pid_t), "%d", task->pid);
+	struct mm_struct *task_mm_struct;	
+
+	snprintf(dir_name, 20, "%d", task->pid);
 	snprintf(file_name, 20, "%d.status", task->pid);
 
 	/* Get process data */
 	process_state = task->state;
-	switch(process_state) {
+	task_mm_struct = task->mm;
+	if (!task_mm_struct) {
+		printk("PID: %d - mm is NULL\n", task->pid);
+		task_mm_struct = task->active_mm;
+		if (!task_mm_struct) {
+			printk("PID: %d - active_mm is also NULL\n", task->pid);
+		}
+	}
+
+	switch (process_state) {
 	case 0:
 		process_state_name = "TASK_RUNNING";
 		break;
@@ -331,7 +345,12 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	}
 
 	/*Create data here that you want to write to the file.*/
-	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\n", task->comm, process_state_name);
+//	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\nProcess Priority: %d\nTask Size: %li\nCode Start: %lx, Code End: %lx\n Heap Start: %lx, Heap End: %lx\n", 
+//			task->comm, process_state_name, task->prio, task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
+
+	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\nProcess Priority: %d static priority: %d normal priority: %d\nStart Time: %llu",
+                        task->comm, process_state_name, task->prio, task->static_prio, task->normal_prio, task->start_time);
+
 	memset(sig_file_data, 0, BUFSIZE);
 	
 	dir = p4fs_create_dir(sb, root, dir_name);
