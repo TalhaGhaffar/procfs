@@ -20,7 +20,7 @@
 
 #define TMPSIZE 20
 #define BUFSIZE 500
-#define PROC_INFO_SIZE 4000
+#define PROC_INFO_SIZE 1000
 
 
 /* Super block operations for p4fs superblock object */
@@ -57,7 +57,6 @@ static int p4fs_open(struct inode *inode, struct file *filp)
 static ssize_t p4fs_read_file(struct file *file_p, char *buf, 
 		size_t count, loff_t *offset)
 {
-	/* Should I only get the data of the file and dumo it or update the data ? */
 	char tmp[BUFSIZE];
 	int len;
 	
@@ -80,6 +79,22 @@ static ssize_t p4fs_read_file(struct file *file_p, char *buf,
 }
 
 
+static void send_signal_to_process(int signal, struct task_struct *task) {
+	int ret;
+	struct siginfo *si;
+	
+	printk("Sending singal %d to process %s\n", signal, task->comm);
+	si->si_signo = signal;
+	ret = send_sig_info(signal, si, task);
+	if (!ret) 
+		printk("Signal %d delivered to process %d\n", signal, task->pid);
+	else {
+		if (ret == -ESRCH) 
+			printk("Process %d no longer exists\n", task->pid);
+	}
+	
+}
+
 /*
  * Write a file.
  */
@@ -89,6 +104,9 @@ static ssize_t p4fs_write_file(struct file *filp, const char *buf,
         int len;
 	char tmp[TMPSIZE];
 	char *data = (char *) filp->private_data;
+	long process_id;
+	long signal = 0;
+
 	/*
 	 * Only write the file from start.
 	 */
@@ -103,9 +121,22 @@ static ssize_t p4fs_write_file(struct file *filp, const char *buf,
         copy_from_user(tmp, buf, count);
 	
 	/* Write the data */
-	len = snprintf(data, BUFSIZE, "%s", (char *) tmp);	
+	len = snprintf(data, BUFSIZE, "%s", (char *) tmp);
+	
+	if ( !strcmp((&filp->f_path)->dentry->d_name.name, "signal") ) {
+		/* Writing to signal file, need to send signal to the process*/
+		if ( !kstrtol((&filp->f_path)->dentry->d_parent->d_name.name, 10, &process_id)) {
+			struct task_struct *task = pid_task(find_vpid(process_id), PIDTYPE_PID);
+			if (task) {
+				if (!kstrtol(tmp, 10, &signal)){
+					send_signal_to_process((int) signal, task);
+				}
+			}
+		}
+	}
         return len;
 }
+
 
 
 
@@ -117,6 +148,7 @@ static struct file_operations p4fs_file_operations = {
         .open  		= p4fs_open,
         .read   	= p4fs_read_file,
         .write  	= p4fs_write_file,	
+	//.write		= new_sync_write,
 	.read_iter      = generic_file_read_iter,
         .write_iter     = generic_file_write_iter,
         .mmap           = generic_file_mmap,
@@ -261,7 +293,9 @@ static struct dentry *p4fs_create_file (struct super_block *sb,
         struct dentry *dentry;
         struct inode *inode;
         struct qstr qname;
-        
+	char *file_data = kmalloc(PROC_INFO_SIZE, GFP_KERNEL);        
+	int len;
+
         qname.name = name;
         qname.len = strlen (name);
         qname.hash = full_name_hash(name, qname.len);
@@ -275,7 +309,11 @@ static struct dentry *p4fs_create_file (struct super_block *sb,
         if (! inode)
                 goto out_dput;
         /* set pointer to data of the file */
-        inode->i_private = data;
+	len = snprintf(file_data, PROC_INFO_SIZE, "%s", (char *) data);
+	inode->i_private = file_data;
+	//len = snprintf(file_data, PROC_INFO_SIZE, "%s", (char *) data);
+
+        //inode->i_private = data;
 
         /* Add inode to the dentry cache */
         d_add(dentry, inode);
@@ -290,8 +328,9 @@ static struct dentry *p4fs_create_file (struct super_block *sb,
 
 
 
-static char data[PROC_INFO_SIZE];
-static char sig_file_data[BUFSIZE];
+//char data[PROC_INFO_SIZE];
+atomic_t signal_data;
+//char sig_file_data[BUFSIZE];
 
 /*
  * FIXME: Add documentation
@@ -306,22 +345,31 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	char *signal = "signal";
 	long process_state;
 	char *process_state_name;
-
+	char sig_file_data[BUFSIZE];
+	char data[PROC_INFO_SIZE];
+	struct thread_info * thread_info;
 	struct mm_struct *task_mm_struct;	
-
+	char is_kernel_thread[5] = "No";
+	
 	snprintf(dir_name, 20, "%d", task->pid);
 	snprintf(file_name, 20, "%d.status", task->pid);
 
 	/* Get process data */
 	process_state = task->state;
+	pid_t pid = task->pid;
+	thread_info = (struct thread_info*) task->stack;
+	
 	task_mm_struct = task->mm;
-	if (!task_mm_struct) {
+	if (!task->mm) 
+		snprintf(is_kernel_thread, 5, "Yes");
+
+	/*if (!task_mm_struct) {
 		printk("PID: %d - mm is NULL\n", task->pid);
 		task_mm_struct = task->active_mm;
 		if (!task_mm_struct) {
 			printk("PID: %d - active_mm is also NULL\n", task->pid);
 		}
-	}
+	}*/
 
 	switch (process_state) {
 	case 0:
@@ -348,8 +396,8 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 //	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\nProcess Priority: %d\nTask Size: %li\nCode Start: %lx, Code End: %lx\n Heap Start: %lx, Heap End: %lx\n", 
 //			task->comm, process_state_name, task->prio, task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
 
-	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\nProcess Priority: %d static priority: %d normal priority: %d\nStart Time: %llu",
-                        task->comm, process_state_name, task->prio, task->static_prio, task->normal_prio, task->start_time);
+	snprintf(data, PROC_INFO_SIZE, "Process: %s\nPID: %d\nProcess State: %s\nExecuting on CPU: %d\nKernel Thread: %s\nProcess Priority: %d static priority: %d normal priority: %d\nStart Time: %llu",
+                        task->comm, pid, process_state_name, thread_info->cpu, is_kernel_thread, task->prio, task->static_prio, task->normal_prio, task->start_time);
 
 	memset(sig_file_data, 0, BUFSIZE);
 	
@@ -417,7 +465,7 @@ static struct file_system_type p4fs_fs_type = {
 	.owner		= THIS_MODULE,	
 	.mount		= p4fs_mount,
 	.kill_sb 	= kill_litter_super,
-//	.fs_flags       = FS_USERNS_MOUNT,
+	.fs_flags       = FS_USERNS_MOUNT,
 };
 
 
