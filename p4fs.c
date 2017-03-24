@@ -73,7 +73,8 @@ static ssize_t p4fs_read_file(struct file *file_p, char *buf,
 	if (count > len - *offset)
 		count = len - *offset;
 
-	copy_to_user(buf, tmp + *offset, count);
+	if (copy_to_user(buf, tmp + *offset, count))
+		return -EFAULT;
 	*offset += count;
 	return count;
 }
@@ -81,7 +82,7 @@ static ssize_t p4fs_read_file(struct file *file_p, char *buf,
 
 static void send_signal_to_process(int signal, struct task_struct *task) {
 	int ret;
-	struct siginfo *si;
+	struct siginfo *si = kmalloc(sizeof(struct siginfo), GFP_KERNEL);
 	
 	printk("Sending singal %d to process %s\n", signal, task->comm);
 	si->si_signo = signal;
@@ -118,7 +119,8 @@ static ssize_t p4fs_write_file(struct file *filp, const char *buf,
         if (count >= TMPSIZE)
                 return -EINVAL;
         memset(tmp, 0, TMPSIZE);
-        copy_from_user(tmp, buf, count);
+        if (copy_from_user(tmp, buf, count))
+		return -EFAULT;
 	
 	/* Write the data */
 	len = snprintf(data, BUFSIZE, "%s", (char *) tmp);
@@ -350,18 +352,27 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	struct thread_info * thread_info;
 	struct mm_struct *task_mm_struct;	
 	char is_kernel_thread[5] = "No";
-	
+	char *task_mem_info;	
+	pid_t pid = task->pid;
+
 	snprintf(dir_name, 20, "%d", task->pid);
 	snprintf(file_name, 20, "%d.status", task->pid);
 
 	/* Get process data */
 	process_state = task->state;
-	pid_t pid = task->pid;
 	thread_info = (struct thread_info*) task->stack;
 	
 	task_mm_struct = task->mm;
-	if (!task->mm) 
+	task_mem_info = (char *) kmalloc (BUFSIZE, GFP_KERNEL);
+
+	if (!task->mm) {
 		snprintf(is_kernel_thread, 5, "Yes");
+		memset(task_mem_info, 0 ,BUFSIZE);
+		//snprintf(task_mem_info, BUFSIZE, ""); /*FIXME*/
+	} else {
+		snprintf(task_mem_info, BUFSIZE, "Memory Info for the process:\n=======================\nTask Size: %0lX\nCode Start: %09lX, Code End: %09lX\n Heap Start: %09lX, Heap End: %09lX\n",
+                                task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
+	}
 
 	/*if (!task_mm_struct) {
 		printk("PID: %d - mm is NULL\n", task->pid);
@@ -396,8 +407,7 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 //	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\nProcess Priority: %d\nTask Size: %li\nCode Start: %lx, Code End: %lx\n Heap Start: %lx, Heap End: %lx\n", 
 //			task->comm, process_state_name, task->prio, task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
 
-	snprintf(data, PROC_INFO_SIZE, "Process: %s\nPID: %d\nProcess State: %s\nExecuting on CPU: %d\nKernel Thread: %s\nProcess Priority: %d static priority: %d normal priority: %d\nStart Time: %llu",
-                        task->comm, pid, process_state_name, thread_info->cpu, is_kernel_thread, task->prio, task->static_prio, task->normal_prio, task->start_time);
+	snprintf(data, PROC_INFO_SIZE, "Process: %s\nPID: %d\nProcess State: %s\nExecuting on CPU: %d\nKernel Thread: %s\nProcess Priority: %d static priority: %d normal priority: %d\nStart Time: %llu\n%s", task->comm, pid, process_state_name, thread_info->cpu, is_kernel_thread, task->prio, task->static_prio, task->normal_prio, task->start_time, task_mem_info);
 
 	memset(sig_file_data, 0, BUFSIZE);
 	
@@ -411,6 +421,7 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	list_for_each_entry(child, &task->children, sibling){
 		p4fs_create_proc_hierarchy(sb, dir, child);
 	} 
+	kfree(task_mem_info);
 }
 
 
