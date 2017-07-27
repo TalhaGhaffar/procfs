@@ -48,11 +48,7 @@ static int p4fs_open(struct inode *inode, struct file *filp)
 }
 
 /*
- * FIXME: 
- * 	From where am I called?
- *	Read data from the file
- *	Use file's name to get pid, use pid to get information from process' task_struct
- *	Copy the updated data to the user space.
+ * Read data from the file
  */
 static ssize_t p4fs_read_file(struct file *file_p, char *buf, 
 		size_t count, loff_t *offset)
@@ -79,6 +75,9 @@ static ssize_t p4fs_read_file(struct file *file_p, char *buf,
 	return count;
 }
 
+/*
+ * Finction to send signal to the process
+ */
 
 static void send_signal_to_process(int signal, struct task_struct *task) {
 	int ret;
@@ -88,16 +87,16 @@ static void send_signal_to_process(int signal, struct task_struct *task) {
 	si->si_signo = signal;
 	ret = send_sig_info(signal, si, task);
 	if (!ret) 
-		printk("Signal %d delivered to process %d\n", signal, task->pid);
+		printk("Signal %d delivered to process %d (%s)\n", signal, task->pid, task->comm);
 	else {
 		if (ret == -ESRCH) 
 			printk("Process %d no longer exists\n", task->pid);
 	}
-	
+	kfree(si);
 }
 
 /*
- * Write a file.
+ * Write to a file on this filesystem.
  */
 static ssize_t p4fs_write_file(struct file *filp, const char *buf,
                 size_t count, loff_t *offset)
@@ -108,14 +107,9 @@ static ssize_t p4fs_write_file(struct file *filp, const char *buf,
 	long process_id;
 	long signal = 0;
 
-	/*
-	 * Only write the file from start.
-	 */
+	/*Only write the file from start */
         if (*offset != 0)
                 return -EINVAL;
-	/*
-	 * Read the value from the user.
-	 */
         if (count >= TMPSIZE)
                 return -EINVAL;
         memset(tmp, 0, TMPSIZE);
@@ -144,13 +138,11 @@ static ssize_t p4fs_write_file(struct file *filp, const char *buf,
 
 /*
  * file operations structure.
- * FIXME: What do I actually need here?
  */
 static struct file_operations p4fs_file_operations = {
         .open  		= p4fs_open,
         .read   	= p4fs_read_file,
         .write  	= p4fs_write_file,	
-	//.write		= new_sync_write,
 	.read_iter      = generic_file_read_iter,
         .write_iter     = generic_file_write_iter,
         .mmap           = generic_file_mmap,
@@ -161,7 +153,7 @@ static struct file_operations p4fs_file_operations = {
 };
 
 /*
- * FIXME: Write documentation
+ * Create an inode in this filesystem
  * @sb: Superblock
  * @dir: Inode
  * @mode: Mode for the new inode
@@ -199,7 +191,6 @@ struct inode *p4fs_get_inode(struct super_block *sb,
 /*
  * File creation. Allocate an inode, and we're done..
  */
-/* SMP-safe */
 static int p4fs_mknod(struct inode *dir, struct dentry *dentry, 
 			umode_t mode, dev_t dev)
 {
@@ -232,7 +223,6 @@ static const struct inode_operations p4fs_dir_inode_operations = {
         .lookup         = simple_lookup,
         .link           = simple_link,
         .unlink         = simple_unlink,
-//        .symlink        = ramfs_symlink,
         .mkdir          = p4fs_mkdir,
         .rmdir          = simple_rmdir,
         .mknod          = p4fs_mknod,
@@ -242,11 +232,8 @@ static const struct inode_operations p4fs_dir_inode_operations = {
 
 
 /*
- * FIXME: Fix my comment. Also my functionality
- * Create a directory which can be used to hold files.  This code is
- * almost identical to the "create file" logic, except that we create
- * the inode with a different mode, and use the libfs "simple" operations.
- */
+ * Create a directtory
+*/
 static struct dentry *p4fs_create_dir (struct super_block *sb,
                 struct dentry *parent, const char *name)
 {
@@ -281,8 +268,7 @@ static struct dentry *p4fs_create_dir (struct super_block *sb,
 
 
 /*
- * FIXME: FIx my doccumentation
- * Create a file mapping a name to a counter
+ * Create a file in this filesystem
  * @sb: Superblock for the file system
  * @dir: Dentry for the directory where file is to be created
  * @name: Name of the file
@@ -331,11 +317,11 @@ static struct dentry *p4fs_create_file (struct super_block *sb,
 
 
 //char data[PROC_INFO_SIZE];
-atomic_t signal_data;
+//atomic_t signal_data;
 //char sig_file_data[BUFSIZE];
 
 /*
- * FIXME: Add documentation
+ * Creates process hierarchy on the filesystem
  */
 static void p4fs_create_proc_hierarchy(struct super_block *sb, 
 		struct dentry *root, struct task_struct *task)
@@ -368,19 +354,11 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	if (!task->mm) {
 		snprintf(is_kernel_thread, 5, "Yes");
 		memset(task_mem_info, 0 ,BUFSIZE);
-		//snprintf(task_mem_info, BUFSIZE, ""); /*FIXME*/
 	} else {
-		snprintf(task_mem_info, BUFSIZE, "Memory Info for the process:\n=======================\nTask Size: %0lX\nCode Start: %09lX, Code End: %09lX\n Heap Start: %09lX, Heap End: %09lX\n",
-                                task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
+		snprintf(task_mem_info, BUFSIZE, 
+				"Memory Info for the process:\n=======================\nTask Size: %0lX\nCode Start: %09lX, Code End: %09lX\n Heap Start: %09lX, Heap End: %09lX\n",
+                              	task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
 	}
-
-	/*if (!task_mm_struct) {
-		printk("PID: %d - mm is NULL\n", task->pid);
-		task_mm_struct = task->active_mm;
-		if (!task_mm_struct) {
-			printk("PID: %d - active_mm is also NULL\n", task->pid);
-		}
-	}*/
 
 	switch (process_state) {
 	case 0:
@@ -404,8 +382,6 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 	}
 
 	/*Create data here that you want to write to the file.*/
-//	snprintf(data, BUFSIZE, "Process: %s\nProcess State: %s\nProcess Priority: %d\nTask Size: %li\nCode Start: %lx, Code End: %lx\n Heap Start: %lx, Heap End: %lx\n", 
-//			task->comm, process_state_name, task->prio, task->mm->task_size, task->mm->start_code, task->mm->end_code, task->mm->start_brk, task->mm->brk);
 
 	snprintf(data, PROC_INFO_SIZE, "Process: %s\nPID: %d\nProcess State: %s\nExecuting on CPU: %d\nKernel Thread: %s\nProcess Priority: %d static priority: %d normal priority: %d\nStart Time: %llu\n%s", task->comm, pid, process_state_name, thread_info->cpu, is_kernel_thread, task->prio, task->static_prio, task->normal_prio, task->start_time, task_mem_info);
 
@@ -426,7 +402,7 @@ static void p4fs_create_proc_hierarchy(struct super_block *sb,
 
 
 /*
- * FIXME: Write doccunentation
+ * Fill superblick for the filesystem
  */
 static int p4fs_fill_super(struct super_block *sb, void *data, int silent) {
 	struct inode *root;
@@ -449,19 +425,14 @@ static int p4fs_fill_super(struct super_block *sb, void *data, int silent) {
         if (!sb->s_root)
                 return -ENOMEM;
 
-	/* FIXME: Appropriate place to create files on this filesystem? */
 	//p4fs_create_files(sb, sb->s_root);
 	p4fs_create_proc_hierarchy(sb, sb->s_root, &init_task);
 	return 0;
 }
 
 
-/* FIXME: Parameter Description
+/*
  * Will be called by vfs_mount to mount this file system 
- * @fs_type: Filesystem type structure
- * @flags: 
- * @dev_name: 
- * @data: 
  */
 struct dentry *p4fs_mount(struct file_system_type *fs_type,
         int flags, const char *dev_name, void *data)
