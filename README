@@ -1,0 +1,30 @@
+Source file for the module: p4fs.c
+Run make to compile the module
+	- The moudle is compiled agains the 4.0.9 kernel provided with the VM (VMWare Player + KVM) @ /home/user/Desktop/VM/linux-4.0.9/
+	
+
+Available test files:
+	test.c (compile using gcc -o test test.c)
+	test_long_running.c (to easily test killing the process by writing to its signal file)
+
+Notes:
+====
+
+1. Become root (by running 'su' on target machine) to easily navigate/dump file contents/write signal.
+2. remount.sh is added to easily remout the file system.
+3. Testing:
+	a. Copy the module, test executables and remount.sh to the target (I simply scp the files into the KVM)
+	b. Run su to become root
+	c. Create directory "/mnt/p4fsdisk"
+	d. Go to directory where all the files are copied
+	e. Run command "./test 3; ./remount.sh"
+		test exe will create a number of processes (15 for input 3) in a hierarchy
+		As a result of remounting, the files will be visible in the FS @ /mnt/p4fsdisk
+	f. To test signal delivery,
+		Run "./test_long_running &" 
+			PID will be printed on console
+			Run the command
+				find /mnt/p4fsdisk/ -name "<PID>.status"
+			Use the directory info from the result of find command to write signal to the process' signal file.
+4. Some screenshots are availabe in the archive to demonstrate.
+
